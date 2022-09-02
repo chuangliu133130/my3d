@@ -1,0 +1,248 @@
+
+
+import UIKit
+import GMECTarget
+
+class GMMetaLifeUnityController: UIViewController {
+    //
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .white
+        // 初始化unity
+        GMUnityManager.shared.initUnityFrameWork()
+        // 添加到控制器中
+        addUnityView()
+    }
+    
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+    }
+    
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        // 进入unity场景强制旋屏 到 横屏页面
+        navigationController?.navigationBar.isHidden = true
+        
+        let target = GMECTarget.sharedInstance().matchInstance(withProtocolString: "GMECMainProjectProtocol") as! GMECMainProjectProtocol
+        target.rotateScreen?(UIInterfaceOrientation.landscapeRight)
+        // 判断是否被挂起
+        if GMUnityManager.shared.isPause {
+            GMUnityManager.shared.pauseUnity(false)
+        }
+        
+        addUnityView()
+    }
+    
+    private func addUnityView() {
+        if GMUnityManager.shared.unityInitialiezd() {
+            if let unityView = GMUnityManager.shared.ufw?.appController().rootView  {
+                if unityView.superview == nil {
+                    unityView.frame = view.bounds
+                    view.addSubview(unityView)
+                }
+            }
+        }
+    }
+    
+    deinit {
+       print("Unity控制器释放！！！")
+    }
+    
+    
+}
+
+
+///////////////
+
+
+//
+//  GMUnityManager.swift
+//  GomeMetaLife
+//
+//  Created by qianyuewei on 2022/8/12.
+//
+
+import UIKit
+import UnityFramework
+import GMECMetaLifeKit
+
+class GMUnityManager: NSObject{
+    
+    static let shared:GMUnityManager = GMUnityManager()
+    //私有化初始化方法，防止外部通过init直接创建实例
+    private override init() {}
+    var appLaunchOpts:[UIApplication.LaunchOptionsKey : Any]?
+    var ufw: UnityFramework?
+    // unity 当前是否处于挂起状态
+    var isPause:Bool = true
+    public func initUnityFrameWork() {
+        ufw = getUnityFrameWork()
+        if let ufw = self.ufw {
+            ufw.setDataBundleId("com.unity3d.framework")
+            ufw.register(self)
+            NSClassFromString("FrameworkLibAPI")?.registerAPIforNativeCalls(self)
+            ufw.runEmbedded(withArgc: CommandLine.argc, argv: CommandLine.unsafeArgv, appLaunchOpts: appLaunchOpts)
+            // 设置quite回调,否则unity退出 会默认退出APP。 调用此回调可保证quit后APP不闪退，但是quite后再次initUnity会闪退;
+            // 因此退出unity场景只能调用 unload 方法，释放大部分内存;
+            ufw.appController().quitHandler = { [weak self] in
+                print("unity: AppController.quitHandler called")
+                self?.unloadUnityInterenal()
+            }
+            
+            // 初始化 注入cookie
+            updateCookieToUnity()
+            
+        }
+    }
+    // 判断Unity是否初始化成功
+    public func unityInitialiezd() -> Bool {
+        return self.ufw != nil && self.ufw?.appController() != nil
+
+    }
+    // 挂起unity
+    public func pauseUnity(_ isPause:Bool) {
+        if isPause {
+            self.ufw?.pause(true)
+            self.isPause = true
+        }else{
+            self.ufw?.pause(false)
+            self.isPause = false
+        }
+    }
+
+    private func getUnityFrameWork() -> UnityFramework? {
+        let bundlePath = Bundle.main.bundlePath + "/Frameworks/UnityFramework.framework"
+        let bundle = Bundle(path: bundlePath)
+        if bundle?.isLoaded == false {
+            bundle?.load()
+        }
+        let ufw = bundle?.principalClass?.getInstance()
+        if ufw?.appController() == nil{
+            let machineHeader = UnsafeMutablePointer<MachHeader>.allocate(capacity: 1)
+            machineHeader.pointee = _mh_execute_header
+//            ufw!.setExecuteHeader(machineHeader)
+//            ufw?.setExecute(machineHeader)
+            
+        }
+        return ufw
+    }
+    // 将cookie和uid值传递给unity
+    private func updateCookieToUnity() {
+        let cookies = GMOCTransform.getAllCookies()
+        var cookieStr:String?
+        for item in cookies {
+            if let cookie = item as? HTTPCookie {
+                if  let cookieStrValue = cookieStr {
+                    cookieStr = cookieStrValue + " ;\(cookie.name)=\(cookie.value)"
+                }else{
+                    cookieStr = "\(cookie.name)=\(cookie.value)"
+                }
+            }
+        }
+        sendMessage(moudleName: "Ios2Unity", functionName: "SetCookie", message: cookieStr ?? "")
+        sendMessage(moudleName: "Ios2Unity", functionName: "SetUseId", message: GMFUserInfo.shared().profileID ?? "")
+        // 设置环境
+        let env = GMOCTransform.enviromentType()
+        var envStr = ""
+        if env == .UAT {
+            envStr = "0"
+        }else if env == .PRO {
+            envStr = "1"
+        }
+        sendMessage(moudleName: "Ios2Unity", functionName: "SetNetworkEnvironment", message: envStr)
+
+    }
+}
+
+// unity 生命周期监听
+extension GMUnityManager: UnityFrameworkListener {
+    // 卸载Unity
+    private func unloadUnityInterenal() {
+        if let ufw = self.ufw {
+            ufw.unregisterFrameworkListener(self)
+        }
+        self.ufw = nil
+    }
+    
+    // 关闭Unity控制器
+    private func closeUnityVC() {
+        let curentNav = UIApplication.getCurrentSelectNavigationVC()
+        guard let vc = curentNav else { return }
+        
+        for (index,childVC) in vc.viewControllers.enumerated() {
+            if childVC is GMMetaLifeUnityController {
+                if index == (vc.viewControllers.count - 1) {
+                    vc.popViewController(animated: true)
+                }else{
+                    vc.viewControllers.remove(at: index)
+                }
+            }
+        }
+        // 切换根控制器
+        let delegate =  UIApplication.shared.delegate as! AppDelegate
+        delegate.window?.rootViewController = delegate.rootVC
+        delegate.window?.makeKeyAndVisible()
+        
+    }
+    
+    func unityDidUnload(_ notification: Notification!) {
+        unloadUnityInterenal()
+    }
+    
+    func unityDidQuit(_ notification: Notification!) {
+        unloadUnityInterenal()
+    }
+    
+    
+}
+
+
+// 原生 调  unity: 执行sendMessageToGO方法
+extension GMUnityManager {
+    // 原生调用Unity方法： 模块名、方法名、参数 均为事先约定
+    public func sendMessage(moudleName:String,functionName:String,message:String) {
+        if unityInitialiezd() {
+            self.ufw?.sendMessageToGO(withName: moudleName, functionName: functionName, message: message)
+        }
+    }
+}
+
+// unity 调 原生方法: 实现 NativeCallsProtocol 协议内容
+extension GMUnityManager: NativeCallsProtocol {
+    
+    func destoryUnity() {
+        // unity页面销毁 旋转竖屏
+        closeUnityVC()
+        // 强制恢复竖屏状态
+        let target = GMECTarget.sharedInstance().matchInstance(withProtocolString: "GMECMainProjectProtocol") as! GMECMainProjectProtocol
+        target.rotateScreen?(UIInterfaceOrientation.portrait)
+    
+    }
+    
+    func turn(onNative urlStr: String!) {
+        if urlStr != nil {
+            if let nav = UIApplication.getCurrentSelectNavigationVC() {
+                // 挂起unity
+                pauseUnity(true)
+                self.ufw?.appController().rootView.removeFromSuperview()
+                // 旋转到竖屏
+                let target = GMECTarget.sharedInstance().matchInstance(withProtocolString: "GMECMainProjectProtocol") as! GMECMainProjectProtocol
+                target.rotateScreen?(UIInterfaceOrientation.portrait)
+                // push页面
+                jumpToScheme(nav, urlStr)
+                // 切换 window
+                let delegate =  UIApplication.shared.delegate as! AppDelegate
+                delegate.window?.rootViewController = delegate.rootVC
+                delegate.window?.makeKeyAndVisible()
+
+            }
+        }
+    }
+    
+    func getCookie() -> String! {
+        return ""
+    }
+
+}
+
+
